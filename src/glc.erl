@@ -68,10 +68,13 @@
     compile/3,
     compile/4,
     handle/2,
+    handle_many/2,
     get/2,
     delete/1,
     reset_counters/1,
     reset_counters/2,
+    snapshot/1,
+    explain/1,
     start/0,
     terminate/2
 ]).
@@ -230,6 +233,41 @@ run(Module, Fun, Event) when is_list(Event) ->
 run(Module, Fun, Event) ->
     Module:runjob(Fun, Event).
 
+
+%% @doc Handle a list of events in one call.
+%% More efficient than calling handle/2 in a loop: each event is processed
+%% through the compiled filter individually, but avoids per-call overhead.
+-spec handle_many(atom(), [gre:event() | [{atom(), term()}]]) -> ok.
+handle_many(Module, Events) ->
+    lists:foreach(fun(E) ->
+        case E of
+            E when is_list(E) -> Module:handle(gre:make(E, [list]));
+            E -> Module:handle(E)
+        end
+    end, Events).
+
+%% @doc Return all statistics as an atomic map snapshot.
+%% Unlike info/1 which makes separate calls per counter, this reads
+%% all counters in a single gen_server call for consistency.
+-spec snapshot(atom()) -> #{atom() => non_neg_integer()}.
+snapshot(Module) ->
+    CountsTable = Module:table(counters),
+    case CountsTable of
+        undefined ->
+            #{input => 0, filter => 0, output => 0,
+              job_input => 0, job_run => 0,
+              job_time => 0, job_error => 0};
+        _ ->
+            gr_counter:snapshot(CountsTable)
+    end.
+
+%% @doc Return a human-readable representation of the optimized query.
+%% Shows the query tree after glc_lib:reduce/1 has been applied, which
+%% may differ from the original due to flattening and deduplication.
+-spec explain(atom()) -> iolist().
+explain(Module) ->
+    Tree = Module:explain(),
+    glc_lib:pp(Tree).
 
 %% @doc Return all statistics for a query module as a proplist.
 info(Module) ->
@@ -662,7 +700,7 @@ events_test_() ->
                 fun() ->
                     Self = self(),
                     {compiled, Mod} = setup_query(testmod18,
-                        glc:with(glc:gt(runtime, 0.0),
+                        glc:with(glc:gte(runtime, 0.0),
                             fun(Event) -> Self ! gre:fetch(runtime, Event) end)),
                     glc:run(Mod, fun(Event, _Store) ->
                         gre:fetch(a, Event) + 1
@@ -685,6 +723,42 @@ events_test_() ->
             {"union error test",
                 fun() ->
                     ?assertError(badarg, glc:union([glc:eq(a, 1)]))
+                end
+            },
+            {"snapshot returns consistent map",
+                fun() ->
+                    {compiled, Mod} = setup_query(testmod20, glc:null(true)),
+                    glc:handle(Mod, gre:make([], [list])),
+                    glc:handle(Mod, gre:make([], [list])),
+                    Snap = glc:snapshot(Mod),
+                    ?assert(is_map(Snap)),
+                    ?assertEqual(2, maps:get(input, Snap)),
+                    ?assertEqual(2, maps:get(output, Snap)),
+                    ?assertEqual(0, maps:get(filter, Snap))
+                end
+            },
+            {"handle_many processes batch",
+                fun() ->
+                    {compiled, Mod} = setup_query(testmod21, glc:eq(a, 1)),
+                    Events = [gre:make([{a, 1}], [list]),
+                              gre:make([{a, 2}], [list]),
+                              [{a, 1}]],
+                    glc:handle_many(Mod, Events),
+                    ?assertEqual(3, Mod:info(input)),
+                    ?assertEqual(2, Mod:info(output)),
+                    ?assertEqual(1, Mod:info(filter))
+                end
+            },
+            {"explain returns readable output",
+                fun() ->
+                    {compiled, Mod} = setup_query(testmod22,
+                        glc:all([glc:eq(a, 1), glc:gt(b, 2)])),
+                    Result = glc:explain(Mod),
+                    ?assert(is_list(Result) orelse is_binary(Result)),
+                    Flat = iolist_to_binary(Result),
+                    ?assert(byte_size(Flat) > 0),
+                    ?assertNotEqual(nomatch, binary:match(Flat, <<"a">>)),
+                    ?assertNotEqual(nomatch, binary:match(Flat, <<"b">>))
                 end
             }
         ]
