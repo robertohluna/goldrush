@@ -19,7 +19,8 @@
     reduce/1,
     matches/2,
     onoutput/1,
-    onoutput/2
+    onoutput/2,
+    pp/1
 ]).
 
 -ifdef(TEST).
@@ -268,6 +269,36 @@ is_valid(_Other) ->
 valid(Term) ->
     is_valid(Term) orelse erlang:error(badarg, [Term]),
     Term.
+
+
+%% @doc Pretty-print a query tree as a human-readable iolist.
+%% Useful for debugging and understanding how reduce/1 optimized a query.
+-spec pp(glc_ops:op()) -> iolist().
+pp({null, true})          -> <<"*">>;
+pp({null, false})         -> <<"(none)">>;
+pp({Key, '=',  V})        -> [a2b(Key), <<"==">>, pp_val(V)];
+pp({Key, '!=', V})        -> [a2b(Key), <<"!=">>, pp_val(V)];
+pp({Key, '>',  V})        -> [a2b(Key), <<">">>,  pp_val(V)];
+pp({Key, '>=', V})        -> [a2b(Key), <<">=">>, pp_val(V)];
+pp({Key, '<',  V})        -> [a2b(Key), <<"<">>,  pp_val(V)];
+pp({Key, '=<', V})        -> [a2b(Key), <<"=<">>, pp_val(V)];
+pp({Key, '*'})            -> [a2b(Key), <<":exists">>];
+pp({Key, '!'})            -> [a2b(Key), <<":missing">>];
+pp({all, Conds})          -> [<<"all(">>, pp_join(Conds), <<")">>];
+pp({any, Conds})          -> [<<"any(">>, pp_join(Conds), <<")">>];
+pp({with, Cond, _Fun})    -> [<<"with(">>, pp(Cond), <<")">>];
+pp(Other)                 -> [io_lib:format("~p", [Other])].
+
+pp_join(Items) ->
+    lists:join(<<", ">>, [pp(I) || I <- Items]).
+
+pp_val(V) when is_atom(V)    -> a2b(V);
+pp_val(V) when is_integer(V) -> integer_to_binary(V);
+pp_val(V) when is_float(V)   -> float_to_binary(V, [{decimals,6},compact]);
+pp_val(V) when is_binary(V)  -> [<<"\"">>, V, <<"\"">>];
+pp_val(V)                    -> iolist_to_binary(io_lib:format("~p", [V])).
+
+a2b(A) -> atom_to_binary(A, utf8).
 
 
 -ifdef(TEST).

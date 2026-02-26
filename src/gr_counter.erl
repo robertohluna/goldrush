@@ -13,7 +13,8 @@
 -export([start_link/1,
          list/1, lookup_element/2,
          insert_counter/3,
-         update_counter/3, reset_counters/2]).
+         update_counter/3, reset_counters/2,
+         snapshot/1, batch_update/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -76,6 +77,34 @@ reset_counters(Server, Counter) ->
         Else -> Else
     end.
 
+%% @doc Return all counters as a map in a single atomic read.
+%% Unlike individual lookup_element calls, this gives a consistent
+%% view of all counters at one point in time.
+-spec snapshot(atom() | pid()) -> #{atom() => non_neg_integer()}.
+snapshot(Server) ->
+    case (catch gen_server:call(Server, snapshot)) of
+        {'EXIT', _Reason} ->
+            snapshot(gr_guardian:await_pid(Server));
+        Map -> Map
+    end.
+
+%% @doc Apply a list of counter deltas in a single cast.
+%% Each element is {Counter, Increment}. Reduces gen_server message
+%% pressure when processing batches of events.
+-spec batch_update(atom() | pid(), [{atom(), integer()}]) -> ok.
+batch_update(Server, Deltas) when is_atom(Server) ->
+    case whereis(Server) of
+        undefined ->
+            batch_update(gr_guardian:await_pid(Server), Deltas);
+        Pid ->
+            case erlang:is_process_alive(Pid) of
+                true  -> batch_update(Pid, Deltas);
+                false -> batch_update(gr_guardian:await_pid(Server), Deltas)
+            end
+    end;
+batch_update(Server, Deltas) when is_pid(Server) ->
+    gen_server:cast(Server, {batch_update, Deltas}).
+
 %%--------------------------------------------------------------------
 start_link(Name) ->
     gen_server:start_link({local, Name}, ?MODULE, [], []).
@@ -124,6 +153,13 @@ handle_call({reset_counters, Counter}, From, State) ->
         undefined -> {noreply, State#state{pending=[{Call, From}|Pending]}};
         _ -> {reply, do_insert(TableId, Term), State}
     end;
+handle_call(snapshot=Call, From, State) ->
+    TableId = State#state.table_id,
+    Pending = State#state.pending,
+    case TableId of
+        undefined -> {noreply, State#state{pending=[{Call, From}|Pending]}};
+        _ -> {reply, maps:from_list(do_list(TableId)), State}
+    end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unhandled_message}, State}.
 
@@ -136,6 +172,17 @@ handle_cast({update, Counter, Value}=Call, State) ->
              State
     end,
     {noreply, State2};
+handle_cast({batch_update, Deltas}, State) ->
+    TableId = State#state.table_id,
+    case TableId of
+        undefined ->
+            {noreply, State};
+        _ ->
+            lists:foreach(fun({Counter, N}) ->
+                ets:update_counter(TableId, Counter, {2, N})
+            end, Deltas),
+            {noreply, State}
+    end;
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -161,8 +208,9 @@ code_change(_OldVsn, State, _Extra) ->
 
 dispatch_call(TableId, Call) ->
     case Call of
-        list                  -> do_list(TableId);
-        {insert, Term}        -> do_insert(TableId, Term);
+        list                   -> do_list(TableId);
+        snapshot               -> maps:from_list(do_list(TableId));
+        {insert, Term}         -> do_insert(TableId, Term);
         {lookup_element, Term} -> do_lookup_element(TableId, Term)
     end.
 

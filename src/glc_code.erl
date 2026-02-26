@@ -85,6 +85,7 @@ abstract_module_(Module, #module{tables=Tables,
        [?erl:list([
         ?erl:arity_qualifier(?erl:atom(get), ?erl:integer(1)),
         ?erl:arity_qualifier(?erl:atom(info), ?erl:integer(1)),
+        ?erl:arity_qualifier(?erl:atom(explain), ?erl:integer(0)),
         ?erl:arity_qualifier(?erl:atom(reset_counters), ?erl:integer(1)),
         ?erl:arity_qualifier(?erl:atom(table), ?erl:integer(1)),
         ?erl:arity_qualifier(?erl:atom(runjob), ?erl:integer(2)),
@@ -96,6 +97,11 @@ abstract_module_(Module, #module{tables=Tables,
         [?erl:clause(
             [?erl:underscore()], none,
                 [?erl:abstract({error, undefined})])]),
+     %% explain() -> term(). (returns the optimized query tree)
+     ?erl:function(
+        ?erl:atom(explain),
+        [?erl:clause([], none,
+            [?erl:abstract(strip_funs(Tree))])]),
      %% info(Name) -> Term.
      ?erl:function(
         ?erl:atom(info),
@@ -590,3 +596,16 @@ abstract_apply(Module, Function, Arguments) ->
 -spec abstract_apply(atom(), [syntaxTree()]) -> syntaxTree().
 abstract_apply(Function, Arguments) ->
     ?erl:application(?erl:atom(Function), Arguments).
+
+%% @private Strip fun values from a query tree so it can be embedded
+%% via erl_syntax:abstract/1 (which cannot handle function references).
+strip_funs({with, Cond, _Fun}) ->
+    {with, strip_funs(Cond), '<fun>'};
+strip_funs({all, Conds}) ->
+    {all, [strip_funs(C) || C <- Conds]};
+strip_funs({any, Conds}) ->
+    {any, [strip_funs(C) || C <- Conds]};
+strip_funs(L) when is_list(L) ->
+    [strip_funs(E) || E <- L];
+strip_funs(Other) ->
+    Other.
